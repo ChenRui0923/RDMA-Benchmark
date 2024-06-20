@@ -411,7 +411,7 @@ static struct context *init_ctx(struct ibv_device *ib_dev, int size,
 		attr.qp_state        = IBV_QPS_INIT;
 		attr.pkey_index      = 0;
 		attr.port_num        = port;
-		attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;;
+		attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
 
 		if (ibv_modify_qp(ctx->qp, &attr,
 				  IBV_QP_STATE              |
