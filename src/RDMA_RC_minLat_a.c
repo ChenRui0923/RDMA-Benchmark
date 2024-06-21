@@ -16,7 +16,11 @@
 *****************************************************************************/
 
 //此版本为RDMA_RC_example.c为基础的修改版
-
+/* 
+*    usage:
+*        client : ./RDMA_RC_minLat_3 -d mlx5_1  -p 12346 -u 10485760 -g 3 -q 10 14.14.14.2  
+*        server : ./RDMA_RC_minLat_3 -d mlx5_1  -p 12346 -u 10485760 -g 3 -q 10 
+*/
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,7 +46,7 @@
 // #define MSG_SIZE (1024 * 1024 * 10)  // 设置消息大小为1MB
 #define LATENCY_MSG_SIZE (1024 * 1024)   //设置用于延迟测试的消息大小
 #define LATENCY_NUM_ITERATIONS 1000   // 设置用于延迟测试的发送次数
-#define NUM_QPS 8  // 定义 QP 的数量
+#define NUM_QPS 4  // 定义 QP 的数量
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 static inline uint64_t htonll(uint64_t x)
@@ -489,10 +493,10 @@ static int post_receive(struct resources *res, int qp_index)
     {
         fprintf(stderr, "failed to post RR\n");
     }
-    else
-    {
-        fprintf(stdout, "Receive Request was posted\n");
-    }
+    // else
+    // {
+    //     fprintf(stdout, "Receive Request was posted\n");
+    // }
     return rc;
 }
 
@@ -553,7 +557,7 @@ static int resources_create(struct resources *res)
     }
     else
     {
-        fprintf(stdout, "waiting on port %d for TCP connection\n", config.tcp_port);
+        // fprintf(stdout, "waiting on port %d for TCP connection\n", config.tcp_port);
         res->sock = sock_connect(NULL, config.tcp_port);
         if(res->sock < 0)
         {
@@ -563,8 +567,8 @@ static int resources_create(struct resources *res)
             goto resources_create_exit;
         }
     }
-    fprintf(stdout, "TCP connection was established\n");
-    fprintf(stdout, "searching for IB devices in host\n");
+    // fprintf(stdout, "TCP connection was established\n");
+    // fprintf(stdout, "searching for IB devices in host\n");
 
     /* get device names in the system */
     dev_list = ibv_get_device_list(&num_devices);
@@ -578,11 +582,11 @@ static int resources_create(struct resources *res)
     /* if there isn't any IB device in host */
     if(!num_devices)
     {
-        fprintf(stderr, "found %d device(s)\n", num_devices);
+        // fprintf(stderr, "found %d device(s)\n", num_devices);
         rc = 1;
         goto resources_create_exit;
     }
-    fprintf(stdout, "found %d device(s)\n", num_devices);
+    // fprintf(stdout, "found %d device(s)\n", num_devices);
 
     /* search for the specific device we want to work with */
     for(i = 0; i < num_devices; i ++)
@@ -673,8 +677,8 @@ static int resources_create(struct resources *res)
     /* only in the server side put the message in the memory buffer */
     if(!config.server_name)
     {
-        strcpy(res->buf, MSG);
-        fprintf(stdout, "going to send the message: '%s'\n", res->buf);
+        // strcpy(res->buf, RDMAMSGW);
+        // fprintf(stdout, "going to send the message: '%s'\n", res->buf);
     }
     else
     {
@@ -690,8 +694,8 @@ static int resources_create(struct resources *res)
         rc = 1;
         goto resources_create_exit;
     }
-    fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
-            res->buf, res->mr->lkey, res->mr->rkey, mr_flags);
+    // fprintf(stdout, "MR was registered with addr=%p, lkey=0x%x, rkey=0x%x, flags=0x%x\n",
+    //         res->buf, res->mr->lkey, res->mr->rkey, mr_flags);
 
     /* create the Queue Pair */
     memset(&qp_init_attr, 0, sizeof(qp_init_attr));
@@ -711,7 +715,7 @@ static int resources_create(struct resources *res)
             rc = 1;
             goto resources_create_exit;
         }
-        fprintf(stdout, "QP%d was created, QP number=0x%x\n", j + 1, res->qp[j]->qp_num);
+        fprintf(stdout, "Connect%d was created, Connect number=0x%x\n", j + 1, res->qp[j]->qp_num);
     }
 
 resources_create_exit:
@@ -821,7 +825,7 @@ static int modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn, uint16_t dli
     int rc;
     memset(&attr, 0, sizeof(attr));
     attr.qp_state = IBV_QPS_RTR;
-    attr.path_mtu = IBV_MTU_512;
+    attr.path_mtu = IBV_MTU_1024;
     attr.dest_qp_num = remote_qpn;
     attr.rq_psn = 0;
     attr.max_dest_rd_atomic = 1;
@@ -928,7 +932,7 @@ static int connect_qp(struct resources *res, int qp_index)
     local_con_data.qp_num = htonl(res->qp[qp_index]->qp_num);
     local_con_data.lid = htons(res->port_attr.lid);
     memcpy(local_con_data.gid, &my_gid, 16);
-    fprintf(stdout, "\nLocal LID = 0x%x\n", res->port_attr.lid);
+    // fprintf(stdout, "\nLocal LID = 0x%x\n", res->port_attr.lid);
     if(sock_sync_data(res->sock, sizeof(struct cm_con_data_t), (char *) &local_con_data, (char *) &tmp_con_data) < 0)
     {
         fprintf(stderr, "failed to exchange connection data between sides\n");
@@ -944,15 +948,15 @@ static int connect_qp(struct resources *res, int qp_index)
 
     /* save the remote side attributes, we will need it for the post SR */
     res->remote_props[qp_index] = remote_con_data;
-    fprintf(stdout, "Remote address = 0x%"PRIx64"\n", remote_con_data.addr);
-    fprintf(stdout, "Remote rkey = 0x%x\n", remote_con_data.rkey);
-    fprintf(stdout, "Remote QP number = 0x%x\n", remote_con_data.qp_num);
-    fprintf(stdout, "Remote LID = 0x%x\n", remote_con_data.lid);
+    // fprintf(stdout, "Remote address = 0x%"PRIx64"\n", remote_con_data.addr);
+    // fprintf(stdout, "Remote rkey = 0x%x\n", remote_con_data.rkey);
+    // fprintf(stdout, "Remote QP number = 0x%x\n", remote_con_data.qp_num);
+    // fprintf(stdout, "Remote LID = 0x%x\n", remote_con_data.lid);
     if(config.gid_idx >= 0)
     {
         uint8_t *p = remote_con_data.gid;
-        fprintf(stdout, "Remote GID = %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x\n",
-                p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
+        // fprintf(stdout, "Remote GID = %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x\n",
+        //         p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15]);
     }
 
     /* modify the QP to init */
@@ -989,7 +993,7 @@ static int connect_qp(struct resources *res, int qp_index)
         fprintf(stderr, "failed to modify QP state to RTS\n");
         goto connect_qp_exit;
     }
-    fprintf(stdout, "QP state was change to RTS\n");
+    // fprintf(stdout, "QP state was change to RTS\n");
 
     /* sync to make sure that both sides are in states that they can connect to prevent packet loose */
     if(sock_sync_data(res->sock, 1, "Q", &temp_char))  /* just send a dummy char back and forth */
@@ -1108,7 +1112,7 @@ static void print_config(void)
     }
     fprintf(stdout, " Message size(B) : %u\n", config.msg_size);
     fprintf(stdout, " Number of iterations : %u\n", config.num_iterations);
-    fprintf(stdout, " ------------------------------------------------\n\n");
+    fprintf(stdout, " ------------------------------------------------\n");
 }
 
 /******************************************************************************
@@ -1216,7 +1220,7 @@ static void rdma_rc_write_benchmark(unsigned int iters, struct resources *res, u
 
     printf("RDMA Write Benchmark\n");
     printf("Connection type : %s\n", "RC");
-    printf("%-20s %-20s %-20s \n", "Message size(byte) ", "Iterations", "Bandwidth(Gbps)");
+    printf("%-20s %-20s %-20s %-20s\n", "#Message size(byte) ", "#Iterations", "#Bandwidth(Gbps)", "#Latency[us]");
     while (size <= max_size) {
         // start write
         if (gettimeofday(&start, NULL)) {
@@ -1236,7 +1240,7 @@ static void rdma_rc_write_benchmark(unsigned int iters, struct resources *res, u
             long long bytes = (long long) size * iters;
             double  bw = bytes * 8.0 / (usec) / 1000;
             sd_bw = bw;
-            printf("%-20d  %-20d   %-20.3lf \n", size, iters, bw);
+            printf("%-20d  %-20d   %-20.3lf %-20f\n", size, iters, bw, usec);
         }
         if (size < max_size && size * 2 > max_size) {
             size = max_size;
@@ -1283,7 +1287,7 @@ static void single_rdma_rc_write_benchmark(unsigned int iters, struct resources 
         float usec = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec);
         long long bytes = (long long) size * iters;
         double  bw = bytes * 8.0 / (usec) / 1000;
-        printf("%-20d  %-20d   %-20.3lf \n", size, iters, bw);
+        printf("%-20d %-20d %-20.3lf %-20.3f\n", size, iters, bw, usec/1000);
     }
 
     // fprintf(stdout, "sd:QP RDMA Write Latency: %.3f µs\n",sd_usec);
@@ -1291,6 +1295,38 @@ static void single_rdma_rc_write_benchmark(unsigned int iters, struct resources 
 
 
     
+}
+
+
+/******************************************************************************
+* Function: rdma_rc_write_lat_measure()
+*
+* Input:
+*
+* Output: none
+*
+* Returns: none
+*
+* Description: 
+******************************************************************************/
+static float rdma_rc_write_lat_measure(unsigned int iters, struct resources *res, uint32_t size, int qp_index) {
+    struct timeval start, end;
+    // start write
+    if (gettimeofday(&start, NULL)) {
+        perror("gettimeofday");
+        return -1.0;
+    }
+    rdma_write_ops(res, iters, size, qp_index);
+    // end write
+    if (gettimeofday(&end, NULL)) {
+        perror("gettimeofday");
+        return -1.0;
+    }
+    
+    float usec = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec);
+    usec = usec/iters;
+    return usec;
+
 }
 
 
@@ -1455,99 +1491,125 @@ int main(int argc, char *argv[])
             goto main_exit;
         }
     }
+
     /* after polling the completion we have the message in the client buffer too */
-    if(config.server_name)
-    {
-        fprintf(stdout, "Message is: '%s'\n", res.buf);
-    }
-    else
-    {
+    // if(config.server_name)
+    // {
+        // fprintf(stdout, "Message is: '%s'\n", res.buf);
+    // }
+    // else
+    // {
         /* setup server buffer with read message */
-        strcpy(res.buf, RDMAMSGR);
-    }
+        // strcpy(res.buf, RDMAMSGR);
+    // }
     /* Sync so we are sure server side has data ready before client tries to read it */
+
+
     if(sock_sync_data(res.sock, 1, "R", &temp_char))  /* just send a dummy char back and forth */
     {
         fprintf(stderr, "sync error before RDMA ops\n");
         rc = 1;
         goto main_exit;
     }
+    if(!config.server_name)
+    {
+        fprintf(stdout, " ------------------------------------------------\n");
+        fprintf(stdout, "        Start RDMA Write Latency Test      \n");     
+        // fprintf(stdout, " ------------------------------------------------\n");   
+    }
+
+
+    int write_min_latency_qp = 0;
+    int write_max_latency_qp = 0;
 
     if(config.server_name)
     {
         struct timeval start[NUM_QPS], end[NUM_QPS];
-        // double read_latency[NUM_QPS];
-        // double read_min_latency = 1e6; // initialize with a large value
         double write_min_latency = 1e6; // initialize with a large value
+        double write_max_latency = 0; // initialize with a large value
         double write_latency[NUM_QPS]; 
         // int read_min_latency_qp = 0;
-        int write_min_latency_qp = 0;
-
+        // int write_min_latency_qp = 0;
 
         /* Measure RDMA write latency for each QP */
-        // config.msg_size = LATENCY_MSG_SIZE; // 使用延迟测量的消息大小
         fprintf(stdout, " ------------------------------------------------\n");
+        fprintf(stdout, "         RDMA Write Latency Test      \n");
         for (int j = 0; j < NUM_QPS; j++) {
-            gettimeofday(&start[j], NULL);
-            for (int i = 0; i < LATENCY_NUM_ITERATIONS; i++)
+/****************************************************************************** 
+        //这一段也是用于测量RDMA write latency,但是用的是post_send和poll_completion函数      
+        gettimeofday(&start[j], NULL);
+        for (int i = 0; i < LATENCY_NUM_ITERATIONS; i++)
+        {
+            // strcpy(res.buf, RDMAMSGW);
+            if(post_send(&res, j, IBV_WR_RDMA_WRITE))
             {
-                // strcpy(res.buf, RDMAMSGW);
-                if(post_send(&res, j, IBV_WR_RDMA_WRITE))
-                {
-                    fprintf(stderr, "failed to post SR 3 on QP %d\n", j);
-                    rc = 1;
-                    goto main_exit;
-                }
-                if(poll_completion(&res, j, 1) < 0)
-                {
-                    fprintf(stderr, "poll completion failed 3 on QP %d\n", j);
-                    rc = 1;
-                    goto main_exit;
-                }
-                // if (i % 100 == 0 && i > 0)
-                // {
-                //     if (poll_completion(&res, j, 100) < 0)
-                //     {
-                //         fprintf(stderr, "poll completion failed 3 on QP %d\n", write_min_latency_qp);
-                //         rc = 1;
-                //         goto main_exit;
-                //     }
-                // }
+                fprintf(stderr, "failed to post SR 3 on QP %d\n", j);
+                rc = 1;
+                goto main_exit;
             }
+            if(poll_completion(&res, j, 1) < 0)
+            {
+                fprintf(stderr, "poll completion failed 3 on QP %d\n", j);
+                rc = 1;
+                goto main_exit;
+            }
+        }
 
-            gettimeofday(&end[j], NULL);
-            write_latency[j] = (end[j].tv_sec - start[j].tv_sec) * 1000000 + (end[j].tv_usec - start[j].tv_usec);
-            write_latency[j] /= LATENCY_NUM_ITERATIONS;
-            fprintf(stdout, "QP %d RDMA Write Latency: %.3f µs\n", j, write_latency[j]);
-
+        gettimeofday(&end[j], NULL);
+        write_latency[j] = (end[j].tv_sec - start[j].tv_sec) * 1000000 + (end[j].tv_usec - start[j].tv_usec);
+        write_latency[j] /= LATENCY_NUM_ITERATIONS;
+        fprintf(stdout, "Connect %d RDMA Write Latency: %.3f µs\n", j, write_latency[j]); 
+******************************************************************************/
+            
+            write_latency[j] = rdma_rc_write_lat_measure(LATENCY_NUM_ITERATIONS, &res, LATENCY_MSG_SIZE, j);
+            fprintf(stdout, "Connect %d RDMA Write Latency: %.3f µs\n", j, write_latency[j]);
             if (write_latency[j] < write_min_latency) {
                 write_min_latency = write_latency[j];
                 write_min_latency_qp = j;
             }
+            if (write_latency[j] > write_max_latency) {
+                write_max_latency = write_latency[j];
+                write_max_latency_qp = j;
+            }
         }
         fprintf(stdout, " ------------------------------------------------\n");
-        fprintf(stdout, "QP %d has the minimum write latency: %.3f µs\n", write_min_latency_qp, write_min_latency);
+        fprintf(stdout, "Connect %d has the minimum write latency: %.3f µs\n", write_min_latency_qp, write_min_latency);
+        fprintf(stdout, "Connect %d has the minimum write latency: %.3f µs\n", write_max_latency_qp, write_max_latency);
         fprintf(stdout, " ------------------------------------------------\n");
 
-
-
-
-
+    }
+    if(!config.server_name)
+    {
+        fprintf(stdout, " ------------------------------------------------\n");
+        fprintf(stdout, "        Start RDMA Write BW Benchmark      \n");  
+        fprintf(stdout, " ------------------------------------------------\n");     
+    }
+    if(config.server_name)
+    {
 
         /* Measure RDMA write bandwidth on the QP with the minimum latency */
-        fprintf(stdout, " --------------------QP %d :RDMA Write BW Benchmark-------------------\n", write_min_latency_qp);
-        printf("%-20s %-20s %-20s \n", "Message size(byte) ", "Iterations", "Bandwidth(Gbps)");
-        for (int i = 2; i <= 1024*1024*128; i *= 2) {
+        fprintf(stdout, "         [Min_Lat: Connect %d] - RDMA Write BW Benchmark      \n", write_min_latency_qp);
+        printf("%-20s %-20s %-20s %-20s\n", "#Message size(byte) ", "#Iterations", "#Bandwidth(Gbps)", "#Latency[us]");
+        for (int i = 2; i <= config.msg_size; i *= 2) {
             single_rdma_rc_write_benchmark(config.num_iterations, &res, i, write_min_latency_qp);
         }
-        // rdma_rc_write_benchmark(config.num_iterations, &res, config.msg_size, write_min_latency_qp, MULTIPLE);
-        // single_rdma_rc_write_benchmark(config.num_iterations, &res, 2, write_min_latency_qp);
         fprintf(stdout, " ------------------------------------------------\n");
 
 
+        /* Measure RDMA write bandwidth on the QP with the maximum latency */
+        fprintf(stdout, "         [Max_Lat: Connect %d] - RDMA Write BW Benchmark      \n", write_max_latency_qp);
+        printf("%-20s %-20s %-20s %-20s\n", "#Message size(byte) ", "#Iterations", "#Bandwidth(Gbps)", "#Latency[us]");
+        for (int i = 2; i <= config.msg_size; i *= 2) {
+            single_rdma_rc_write_benchmark(config.num_iterations, &res, i, write_max_latency_qp);
+        }
+        // rdma_rc_write_benchmark(config.num_iterations, &res, config.msg_size, write_min_latency_qp, MULTIPLE);
+
+        fprintf(stdout, " ------------------------------------------------\n");
+
+/******************************************************************************
+ *      //这一段也是RDMA write bandwidth test,只能测单次，但是可以最高甚至可以跑到超过100Gbps
         struct timeval start_bw, end_bw;
         double m_write_latency, bandwidth;
-        // config.msg_size = temp; // 使用带宽测量的消息大小
         gettimeofday(&start_bw, NULL);
         for (int i = 0; i < config.num_iterations; i++)
         {
@@ -1581,9 +1643,9 @@ int main(int argc, char *argv[])
         double data_size = (double)config.msg_size * (double)config.num_iterations / (1000.0 * 1000.0); // in MB
         bandwidth = data_size / (m_write_latency / 1000000.0); // in MBps
 
-        fprintf(stdout, "cr:QP %d RDMA Write Latency: %.3f µs\n",write_min_latency_qp, m_write_latency);
-
-        fprintf(stdout, "cr:QP %d RDMA Write Bandwidth: %.3f MBps (%.3f Gbps)\n", write_min_latency_qp, bandwidth, bandwidth * 8 / 1000.0);
+        // fprintf(stdout, "cr:QP %d RDMA Write Latency: %.3f µs\n",write_min_latency_qp, m_write_latency);
+        // fprintf(stdout, "cr:QP %d RDMA Write Bandwidth: %.3f MBps (%.3f Gbps)\n", write_min_latency_qp, bandwidth, bandwidth * 8 / 1000.0);
+******************************************************************************/
 
 
 
@@ -1596,10 +1658,10 @@ int main(int argc, char *argv[])
         rc = 1;
         goto main_exit;
     }
-    if(!config.server_name)
-    {
-        fprintf(stdout, "Contents of server buffer: '%s'\n", res.buf);
-    }
+    // if(!config.server_name)
+    // {
+    //     fprintf(stdout, "Contents of server buffer: '%s'\n", res.buf);
+    // }
     rc = 0;
 
 main_exit:
