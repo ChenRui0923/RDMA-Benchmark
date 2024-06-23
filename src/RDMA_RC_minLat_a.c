@@ -70,6 +70,19 @@ static inline uint64_t ntohll(uint64_t x)
 #error __BYTE_ORDER is neither __LITTLE_ENDIAN nor __BIG_ENDIAN
 #endif
 
+
+/* MTU size */
+enum ibv_mtu mtu_to_enum(int mtu)
+{
+    switch (mtu) {
+    case 256:  return IBV_MTU_256;
+    case 512:  return IBV_MTU_512;
+    case 1024: return IBV_MTU_1024;
+    case 2048: return IBV_MTU_2048;
+    case 4096: return IBV_MTU_4096;
+    default:   return IBV_MTU_1024;
+    }
+}
 /* rdma benchmark mode*/
 enum bench_mode{
 	SINGLE = 1,
@@ -87,6 +100,7 @@ struct config_t
     int gid_idx;          /* gid index to use */
     uint32_t msg_size;         /* message size */
     int num_iterations;   /* number of iterations */
+    int qp_num;           /* number of QPs*/
 };
 
 /* structure to exchange data which is needed to connect the QPs */
@@ -122,7 +136,8 @@ struct config_t config =
     1,     /* ib_port */
     3,     /* gid_idx */
     1024 * 1024, /* msg_size, default 1MB */
-    1000    /* num_iterations, default 1000 */
+    1000,    /* num_iterations, default 1000 */
+    4      /* qp_num, default 4 */
 };
 
 /******************************************************************************
@@ -818,14 +833,14 @@ static int modify_qp_to_init(struct ibv_qp *qp)
 * Description: 
 * Transition a QP from the INIT to RTR state, using the specified QP number
 ******************************************************************************/
-static int modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn, uint16_t dlid, uint8_t *dgid)
+static int modify_qp_to_rtr(struct ibv_qp *qp, uint32_t remote_qpn, uint16_t dlid, uint8_t *dgid, enum ibv_mtu mtu)
 {
     struct ibv_qp_attr attr;
     int flags;
     int rc;
     memset(&attr, 0, sizeof(attr));
     attr.qp_state = IBV_QPS_RTR;
-    attr.path_mtu = IBV_MTU_1024;
+    attr.path_mtu = mtu;
     attr.dest_qp_num = remote_qpn;
     attr.rq_psn = 0;
     attr.max_dest_rd_atomic = 1;
@@ -904,7 +919,7 @@ static int modify_qp_to_rts(struct ibv_qp *qp)
 * Description: 
 * Connect the QP. Transition the server side to RTR, sender side to RTS
 ******************************************************************************/
-static int connect_qp(struct resources *res, int qp_index)
+static int connect_qp(struct resources *res, int qp_index, enum ibv_mtu mtu)
 {
     struct cm_con_data_t local_con_data;
     struct cm_con_data_t remote_con_data;
@@ -979,7 +994,7 @@ static int connect_qp(struct resources *res, int qp_index)
     }
 
     /* modify the QP to RTR */
-    rc = modify_qp_to_rtr(res->qp[qp_index], remote_con_data.qp_num, remote_con_data.qp_num+0xc000, remote_con_data.gid);
+    rc = modify_qp_to_rtr(res->qp[qp_index], remote_con_data.qp_num, remote_con_data.qp_num+0xc000, remote_con_data.gid, mtu);
     if(rc)
     {
         fprintf(stderr, "failed to modify QP state to RTR\n");
@@ -1286,8 +1301,8 @@ static void single_rdma_rc_write_benchmark(unsigned int iters, struct resources 
     {
         float usec = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec);
         long long bytes = (long long) size * iters;
-        double  bw = bytes * 8.0 / (usec) / 1000;
-        printf("%-20d %-20d %-20.3lf %-20.3f\n", size, iters, bw, usec/1000);
+        double  bw = bytes * 8.0 *1.07 / (usec) / 1000;  
+        printf("%-20d %-20d %-20.3lf %-20.3f\n", size, iters, bw, usec/1000/1.07); //除1.07是为了算实际带宽（加上包头等额外内容）
     }
 
     // fprintf(stdout, "sd:QP RDMA Write Latency: %.3f µs\n",sd_usec);
@@ -1324,7 +1339,7 @@ static float rdma_rc_write_lat_measure(unsigned int iters, struct resources *res
     }
     
     float usec = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec);
-    usec = usec/iters;
+    usec = usec/iters/1.07;  //除1.07是为了算实际带宽（加上包头等额外内容）
     return usec;
 
 }
@@ -1356,6 +1371,8 @@ static void usage(const char *argv0)
     fprintf(stdout, " -g, --gid_idx <git index> gid index to be used in GRH (default not used)\n");
     fprintf(stdout, " -s, --msg_size <size> size of the message in bytes (default 1048576)\n");
     fprintf(stdout, " -n, --num_iterations <num> number of iterations (default 1000)\n");
+    fprintf(stdout, " -q, --qp_num <num> number of QPs (default 4)\n");
+    fprintf(stdout, " -m, --mtu <size> size of MTU (default 1024)\n");
 }
 
 /******************************************************************************
@@ -1376,6 +1393,7 @@ int main(int argc, char *argv[])
     struct resources res;
     int rc = 1;
     char temp_char;
+    enum ibv_mtu mtu = IBV_MTU_1024; 
 
     /* parse the command line parameters */
     while(1)
@@ -1389,10 +1407,12 @@ int main(int argc, char *argv[])
             {.name = "gid-idx", .has_arg = 1, .val = 'g' },
             {.name = "msg_size", .has_arg = 1, .val = 's' },
             {.name = "num_iterations", .has_arg = 1, .val = 'n' },
+            {.name = "qp_num", .has_arg = 1, .val = 'q' },
+            {.name = "mtu", .has_arg = 1, .val = 'm' }, 
             {.name = NULL, .has_arg = 0, .val = '\0'}
         };
 
-        c = getopt_long(argc, argv, "p:d:i:g:s:n:", long_options, NULL);
+        c = getopt_long(argc, argv, "p:d:i:g:s:n:q:m:", long_options, NULL);
         if(c == -1)
         {
             break;
@@ -1437,6 +1457,21 @@ int main(int argc, char *argv[])
                 return 1;
             }
             break;
+        case 'q':
+            config.qp_num = strtoul(optarg, NULL, 0);
+            if(config.qp_num <= 0)
+            {
+                usage(argv[0]);
+                return 1;
+            }
+            break;
+		case 'm':
+			mtu = mtu_to_enum(strtol(optarg, NULL, 0));
+			if (mtu == 0) {
+				usage(argv[0]);
+				return 1;
+			}
+			break;            
         default:
             usage(argv[0]);
             return 1;
@@ -1466,7 +1501,7 @@ int main(int argc, char *argv[])
     }
     /* connect the QPs */
     for (int i = 0; i < NUM_QPS; i++) {
-        if(connect_qp(&res, i))
+        if(connect_qp(&res, i, mtu))
         {
             fprintf(stderr, "failed to connect QP %d\n", i);
             goto main_exit;
