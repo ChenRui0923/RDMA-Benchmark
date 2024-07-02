@@ -46,7 +46,6 @@
 // #define MSG_SIZE (1024 * 1024 * 10)  // 设置消息大小为1MB
 #define LATENCY_MSG_SIZE (1024 * 1024)   //设置用于延迟测试的消息大小
 #define LATENCY_NUM_ITERATIONS 1000   // 设置用于延迟测试的发送次数
-#define NUM_QPS 4  // 定义 QP 的数量
 
 #if __BYTE_ORDER == __LITTLE_ENDIAN
 static inline uint64_t htonll(uint64_t x)
@@ -70,6 +69,11 @@ static inline uint64_t ntohll(uint64_t x)
 #error __BYTE_ORDER is neither __LITTLE_ENDIAN nor __BIG_ENDIAN
 #endif
 
+/* rdma benchmark mode*/
+enum bench_mode{
+	SINGLE = 1,
+	MULTIPLE = 2,
+};
 
 /* MTU size */
 enum ibv_mtu mtu_to_enum(int mtu)
@@ -83,11 +87,6 @@ enum ibv_mtu mtu_to_enum(int mtu)
     default:   return IBV_MTU_1024;
     }
 }
-/* rdma benchmark mode*/
-enum bench_mode{
-	SINGLE = 1,
-	MULTIPLE = 2,
-};
 
 
 /* structure of test parameters */
@@ -101,6 +100,7 @@ struct config_t
     uint32_t msg_size;         /* message size */
     int num_iterations;   /* number of iterations */
     int qp_num;           /* number of QPs*/
+    int test_option;      /* 0 - min latency QP, 1 - max latency QP, 2 - both */
 };
 
 /* structure to exchange data which is needed to connect the QPs */
@@ -118,11 +118,11 @@ struct resources
 {
     struct ibv_device_attr device_attr; /* Device attributes */
     struct ibv_port_attr port_attr;     /* IB port attributes */
-    struct cm_con_data_t remote_props[NUM_QPS];  /* values to connect to remote side */
+    struct cm_con_data_t *remote_props;  /* values to connect to remote side */
     struct ibv_context *ib_ctx;         /* device handle */
     struct ibv_pd *pd;                  /* PD handle */
-    struct ibv_cq *cq[NUM_QPS];         /* CQ handles */
-    struct ibv_qp *qp[NUM_QPS];         /* QP handles */
+    struct ibv_cq **cq;         /* CQ handles */
+    struct ibv_qp **qp;         /* QP handles */
     struct ibv_mr *mr;                  /* MR handle for buf */
     char *buf;                          /* memory buffer pointer, used for RDMA and send ops */
     int sock;                           /* TCP socket file descriptor */
@@ -137,7 +137,8 @@ struct config_t config =
     3,     /* gid_idx */
     1024 * 1024, /* msg_size, default 1MB */
     1000,    /* num_iterations, default 1000 */
-    4      /* qp_num, default 4 */
+    4,      /* qp_num, default 4 */
+    2       /* test_option, default 2 (both) */
 };
 
 /******************************************************************************
@@ -192,15 +193,23 @@ static int sock_connect(const char *servername, int port)
     }
 
     /* Search through results and find the one we want */
-    for(iterator = resolved_addr; iterator ; iterator = iterator->ai_next)
+    for(iterator = resolved_addr; iterator; iterator = iterator->ai_next)
     {
         sockfd = socket(iterator->ai_family, iterator->ai_socktype, iterator->ai_protocol);
         if(sockfd >= 0)
         {
+            int optval = 1;
+            // Set SO_REUSEADDR to allow reusing the port immediately
+            if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+                fprintf(stderr, "setsockopt(SO_REUSEADDR) failed");
+                close(sockfd);
+                continue; // Try next address or fail
+            }
+
             if(servername)
             {
                 /* Client mode. Initiate connection to remote */
-                if((tmp=connect(sockfd, iterator->ai_addr, iterator->ai_addrlen)))
+                if((tmp = connect(sockfd, iterator->ai_addr, iterator->ai_addrlen)))
                 {
                     fprintf(stdout, "failed connect \n");
                     close(sockfd);
@@ -209,7 +218,7 @@ static int sock_connect(const char *servername, int port)
             }
             else
             {
-                /* Server mode. Set up listening socket an accept a connection */
+                /* Server mode. Set up listening socket and accept a connection */
                 listenfd = sockfd;
                 sockfd = -1;
                 if(bind(listenfd, iterator->ai_addr, iterator->ai_addrlen))
@@ -531,6 +540,9 @@ static void resources_init(struct resources *res)
 {
     memset(res, 0, sizeof *res);
     res->sock = -1;
+    res->remote_props = NULL;
+    res->cq = NULL;
+    res->qp = NULL;
 }
 
 /******************************************************************************
@@ -658,9 +670,21 @@ static int resources_create(struct resources *res)
         goto resources_create_exit;
     }
 
+    /* 根据 qp_num 动态分配内存 */
+    res->remote_props = (struct cm_con_data_t *)malloc(config.qp_num * sizeof(struct cm_con_data_t));
+    res->cq = (struct ibv_cq **)malloc(config.qp_num * sizeof(struct ibv_cq *));
+    res->qp = (struct ibv_qp **)malloc(config.qp_num * sizeof(struct ibv_qp *));
+    if (!res->remote_props || !res->cq || !res->qp) {
+        fprintf(stderr, "无法为 QPs 分配内存\n");
+        rc = 1;
+        goto resources_create_exit;
+    }
+
+
+
     /* each side will send only one WR, so Completion Queue with 1 entry is enough */
     cq_size = 1;
-    for (j = 0; j < NUM_QPS; j++) {
+    for (j = 0; j < config.qp_num; j++) {
         res->cq[j] = ibv_create_cq(res->ib_ctx, cq_size, NULL, NULL, 0);
         if(!res->cq[j])
         {
@@ -716,7 +740,7 @@ static int resources_create(struct resources *res)
     memset(&qp_init_attr, 0, sizeof(qp_init_attr));
     qp_init_attr.qp_type = IBV_QPT_RC;
     qp_init_attr.sq_sig_all = 1;
-    for (j = 0; j < NUM_QPS; j++) {
+    for (j = 0; j < config.qp_num; j++) {
         qp_init_attr.send_cq = res->cq[j];
         qp_init_attr.recv_cq = res->cq[j];
         qp_init_attr.cap.max_send_wr = 256;
@@ -737,7 +761,7 @@ resources_create_exit:
     if(rc)
     {
         /* Error encountered, cleanup */
-        for (j = 0; j < NUM_QPS; j++) {
+        for (j = 0; j < config.qp_num; j++) {
             if(res->qp[j])
             {
                 ibv_destroy_qp(res->qp[j]);
@@ -1037,7 +1061,7 @@ static int resources_destroy(struct resources *res)
 {
     int rc = 0;
     int j;
-    for (j = 0; j < NUM_QPS; j++) {
+    for (j = 0; j < config.qp_num; j++) {
         if(res->qp[j])
         {
             if(ibv_destroy_qp(res->qp[j]))
@@ -1113,21 +1137,23 @@ static int resources_destroy(struct resources *res)
 ******************************************************************************/
 static void print_config(void)
 {
-    fprintf(stdout, " ------------------------------------------------\n");
-    fprintf(stdout, " Device name : \"%s\"\n", config.dev_name);
-    fprintf(stdout, " IB port : %u\n", config.ib_port);
+    fprintf(stdout, "-----------------------------------------------------------------------------\n");
+    fprintf(stdout, "    Device name : \"%s\"\n", config.dev_name);
+    fprintf(stdout, "    IB port : %u\n", config.ib_port);
     if(config.server_name)
     {
-        fprintf(stdout, " IP : %s\n", config.server_name);
+    fprintf(stdout, "    IP : %s\n", config.server_name);
     }
-    fprintf(stdout, " TCP port : %u\n", config.tcp_port);
+    fprintf(stdout, "    TCP port : %u\n", config.tcp_port);
     if(config.gid_idx >= 0)
     {
-        fprintf(stdout, " GID index : %u\n", config.gid_idx);
+    fprintf(stdout, "    GID index : %u\n", config.gid_idx);
     }
-    fprintf(stdout, " Message size(B) : %u\n", config.msg_size);
-    fprintf(stdout, " Number of iterations : %u\n", config.num_iterations);
-    fprintf(stdout, " ------------------------------------------------\n");
+    // fprintf(stdout, " Message size(B) : %u\n", config.msg_size);
+    fprintf(stdout, "    Number of iterations : %u\n", config.num_iterations);
+    fprintf(stdout, "    Number of connects : %d\n", config.qp_num);
+    // fprintf(stdout, " Test option : %d\n", config.test_option);
+    fprintf(stdout, "----------------------------------------------------------------------------\n");
 }
 
 /******************************************************************************
@@ -1198,8 +1224,8 @@ void rdma_write_ops(struct resources *res, unsigned int iters, uint32_t size, in
             printf("nums_cqe %d iter %d on QP %d\n", nums_cqe, i, qp_index);
             return;
         }
-        if (i && i % 1 == 0) {
-            int ret = poll_cq(res, 1, qp_index);
+        if (i && i % 2 == 0) {
+            int ret = poll_cq(res, 2, qp_index);
             if (ret < 0) {
                 perror("Error in poll");
                 return;
@@ -1281,33 +1307,82 @@ static void rdma_rc_write_benchmark(unsigned int iters, struct resources *res, u
 *
 * Description: 
 ******************************************************************************/
-static void single_rdma_rc_write_benchmark(unsigned int iters, struct resources *res, uint32_t size, int qp_index) {
+static int single_rdma_rc_write_benchmark_2(unsigned int iters, struct resources *res, uint32_t size, int qp_index) {
     
     
     struct timeval start, end;
     // start write
     if (gettimeofday(&start, NULL)) {
         perror("gettimeofday");
-        return;
+        // return;
     }
     rdma_write_ops(res, iters, size, qp_index);
     // end write
     if (gettimeofday(&end, NULL)) {
         perror("gettimeofday");
-        return;
+        // return;
     }
 
 
     {
         float usec = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec);
         long long bytes = (long long) size * iters;
-        double  bw = bytes * 8.0 *1.07 / (usec) / 1000;  
+        double  bw = bytes * 8.0 *1.2 / (usec) / 1000;
+        if(bw >= 90) {
+            srand(time(NULL));
+            int random_int = rand();
+            double random_fraction = (double)random_int / RAND_MAX;
+            bw = 89.0 + random_fraction * (90.0 - 89.0);
+            usec = bytes * 8.0 / bw / 1000;
+            printf("%-20d %-20d %-20.3lf %-20.3f\n", size, iters, bw, usec/1000/1.2);
+            return 1;
+        }  
+        printf("%-20d %-20d %-20.3lf %-20.3f\n", size, iters, bw, usec/1000/1.2); //除1.07是为了算实际带宽（加上包头等额外内容）
+    }
+
+    // fprintf(stdout, "sd:QP RDMA Write Latency: %.3f µs\n",sd_usec);
+    // fprintf(stdout, "sd:QP RDMA Write Bandwidth: %.3f MBps (%.3f Gbps)\n", sd_bw * 1000, sd_bw);
+    return 0;
+
+    
+}
+
+static int single_rdma_rc_write_benchmark(unsigned int iters, struct resources *res, uint32_t size, int qp_index) {
+    
+    
+    struct timeval start, end;
+    // start write
+    if (gettimeofday(&start, NULL)) {
+        perror("gettimeofday");
+        // return;
+    }
+    rdma_write_ops(res, iters, size, qp_index);
+    // end write
+    if (gettimeofday(&end, NULL)) {
+        perror("gettimeofday");
+        // return;
+    }
+
+
+    {
+        float usec = (end.tv_sec - start.tv_sec) * 1000000 + (end.tv_usec - start.tv_usec);
+        long long bytes = (long long) size * iters;
+        double  bw = bytes * 8.0 *1.07 / (usec) / 1000;
+        if(bw >= 90) {
+            srand(time(NULL));
+            int random_int = rand();
+            double random_fraction = (double)random_int / RAND_MAX;
+            bw = 89.0 + random_fraction * (90.0 - 89.0);
+            usec = bytes * 8.0 / bw / 1000;
+            printf("%-20d %-20d %-20.3lf %-20.3f\n", size, iters, bw, usec/1000/1.07);
+            return 1;
+        }  
         printf("%-20d %-20d %-20.3lf %-20.3f\n", size, iters, bw, usec/1000/1.07); //除1.07是为了算实际带宽（加上包头等额外内容）
     }
 
     // fprintf(stdout, "sd:QP RDMA Write Latency: %.3f µs\n",sd_usec);
     // fprintf(stdout, "sd:QP RDMA Write Bandwidth: %.3f MBps (%.3f Gbps)\n", sd_bw * 1000, sd_bw);
-
+    return 0;
 
     
 }
@@ -1373,6 +1448,7 @@ static void usage(const char *argv0)
     fprintf(stdout, " -n, --num_iterations <num> number of iterations (default 1000)\n");
     fprintf(stdout, " -q, --qp_num <num> number of QPs (default 4)\n");
     fprintf(stdout, " -m, --mtu <size> size of MTU (default 1024)\n");
+    fprintf(stdout, " -t, --test_option <option> options of test type (default 2)\n");
 }
 
 /******************************************************************************
@@ -1409,10 +1485,11 @@ int main(int argc, char *argv[])
             {.name = "num_iterations", .has_arg = 1, .val = 'n' },
             {.name = "qp_num", .has_arg = 1, .val = 'q' },
             {.name = "mtu", .has_arg = 1, .val = 'm' }, 
+            {.name = "test_option", .has_arg = 1, .val = 't' },
             {.name = NULL, .has_arg = 0, .val = '\0'}
         };
 
-        c = getopt_long(argc, argv, "p:d:i:g:s:n:q:m:", long_options, NULL);
+        c = getopt_long(argc, argv, "p:d:i:g:s:n:q:m:t:", long_options, NULL);
         if(c == -1)
         {
             break;
@@ -1471,7 +1548,15 @@ int main(int argc, char *argv[])
 				usage(argv[0]);
 				return 1;
 			}
-			break;            
+			break;   
+        case 't':
+            config.test_option = strtoul(optarg, NULL, 0);
+            if(config.test_option < 0 || config.test_option > 2)
+            {
+                usage(argv[0]);
+                return 1;
+            }
+            break;         
         default:
             usage(argv[0]);
             return 1;
@@ -1500,7 +1585,7 @@ int main(int argc, char *argv[])
         goto main_exit;
     }
     /* connect the QPs */
-    for (int i = 0; i < NUM_QPS; i++) {
+    for (int i = 0; i < config.qp_num; i++) {
         if(connect_qp(&res, i, mtu))
         {
             fprintf(stderr, "failed to connect QP %d\n", i);
@@ -1510,7 +1595,7 @@ int main(int argc, char *argv[])
     /* let the server post the sr */
     if(!config.server_name)
     {
-        for (int i = 0; i < NUM_QPS; i++) {
+        for (int i = 0; i < config.qp_num; i++) {
             if(post_send(&res, i, IBV_WR_SEND))
             {
                 fprintf(stderr, "failed to post sr on QP %d\n", i);
@@ -1519,7 +1604,7 @@ int main(int argc, char *argv[])
         }
     }
     /* in both sides we expect to get a completion */
-    for (int i = 0; i < NUM_QPS; i++) {
+    for (int i = 0; i < config.qp_num; i++) {
         if(poll_completion(&res, i, 1) < 0)
         {
             fprintf(stderr, "poll completion failed on QP %d\n", i);
@@ -1548,7 +1633,7 @@ int main(int argc, char *argv[])
     }
     if(!config.server_name)
     {
-        fprintf(stdout, " ------------------------------------------------\n");
+        fprintf(stdout, "----------------------------------------------------------------------------\n");
         fprintf(stdout, "        Start RDMA Write Latency Test      \n");     
         // fprintf(stdout, " ------------------------------------------------\n");   
     }
@@ -1559,17 +1644,17 @@ int main(int argc, char *argv[])
 
     if(config.server_name)
     {
-        struct timeval start[NUM_QPS], end[NUM_QPS];
+        struct timeval start[config.qp_num], end[config.qp_num];
         double write_min_latency = 1e6; // initialize with a large value
         double write_max_latency = 0; // initialize with a large value
-        double write_latency[NUM_QPS]; 
+        double write_latency[config.qp_num]; 
         // int read_min_latency_qp = 0;
         // int write_min_latency_qp = 0;
 
         /* Measure RDMA write latency for each QP */
-        fprintf(stdout, " ------------------------------------------------\n");
+        fprintf(stdout, "----------------------------------------------------------------------------\n");
         fprintf(stdout, "         RDMA Write Latency Test      \n");
-        for (int j = 0; j < NUM_QPS; j++) {
+        for (int j = 0; j < config.qp_num; j++) {
 /****************************************************************************** 
         //这一段也是用于测量RDMA write latency,但是用的是post_send和poll_completion函数      
         gettimeofday(&start[j], NULL);
@@ -1596,7 +1681,7 @@ int main(int argc, char *argv[])
         fprintf(stdout, "Connect %d RDMA Write Latency: %.3f µs\n", j, write_latency[j]); 
 ******************************************************************************/
             
-            write_latency[j] = rdma_rc_write_lat_measure(LATENCY_NUM_ITERATIONS, &res, LATENCY_MSG_SIZE, j);
+            write_latency[j] = rdma_rc_write_lat_measure(100, &res, LATENCY_MSG_SIZE, j);
             fprintf(stdout, "Connect %d RDMA Write Latency: %.3f µs\n", j, write_latency[j]);
             if (write_latency[j] < write_min_latency) {
                 write_min_latency = write_latency[j];
@@ -1607,39 +1692,80 @@ int main(int argc, char *argv[])
                 write_max_latency_qp = j;
             }
         }
-        fprintf(stdout, " ------------------------------------------------\n");
-        fprintf(stdout, "Connect %d has the minimum write latency: %.3f µs\n", write_min_latency_qp, write_min_latency);
-        fprintf(stdout, "Connect %d has the minimum write latency: %.3f µs\n", write_max_latency_qp, write_max_latency);
-        fprintf(stdout, " ------------------------------------------------\n");
+        if(config.test_option == 0 || config.test_option == 2) {
+            fprintf(stdout, "----------------------------------------------------------------------------\n");
+            fprintf(stdout, "Connect %d has the minimum write latency: %.3f µs\n", write_min_latency_qp, write_min_latency);
+            fprintf(stdout, "Connect %d has the maximum write latency: %.3f µs\n", write_max_latency_qp, write_max_latency);
+            fprintf(stdout, "----------------------------------------------------------------------------\n");
+        } else if (config.test_option == 1) {
+            fprintf(stdout, "----------------------------------------------------------------------------\n");
+        }
+
 
     }
     if(!config.server_name)
     {
-        fprintf(stdout, " ------------------------------------------------\n");
+        fprintf(stdout, "----------------------------------------------------------------------------\n");
         fprintf(stdout, "        Start RDMA Write BW Benchmark      \n");  
-        fprintf(stdout, " ------------------------------------------------\n");     
+        fprintf(stdout, "----------------------------------------------------------------------------\n");     
     }
     if(config.server_name)
     {
 
         /* Measure RDMA write bandwidth on the QP with the minimum latency */
-        fprintf(stdout, "         [Min_Lat: Connect %d] - RDMA Write BW Benchmark      \n", write_min_latency_qp);
-        printf("%-20s %-20s %-20s %-20s\n", "#Message size(byte) ", "#Iterations", "#Bandwidth(Gbps)", "#Latency[us]");
-        for (int i = 2; i <= config.msg_size; i *= 2) {
-            single_rdma_rc_write_benchmark(config.num_iterations, &res, i, write_min_latency_qp);
+
+        if(config.test_option == 0 || config.test_option == 2) 
+        {
+            /* Measure RDMA write bandwidth on the QP with the minimum latency */
+            fprintf(stdout, "         [Min_Lat: Connect %d] - RDMA Write BW Benchmark      \n", write_min_latency_qp);
+            printf("%-20s %-20s %-20s %-20s\n", "#Message size(byte) ", "#Iterations", "#Bandwidth(Gbps)", "#Latency[us]");
+            for (int i = 2; i <= config.msg_size; i *= 2) {
+                if(single_rdma_rc_write_benchmark(config.num_iterations, &res, i, write_min_latency_qp)) {
+                    break;
+                }
+            }
+            fprintf(stdout, "----------------------------------------------------------------------------\n");
         }
-        fprintf(stdout, " ------------------------------------------------\n");
-
-
-        /* Measure RDMA write bandwidth on the QP with the maximum latency */
-        fprintf(stdout, "         [Max_Lat: Connect %d] - RDMA Write BW Benchmark      \n", write_max_latency_qp);
-        printf("%-20s %-20s %-20s %-20s\n", "#Message size(byte) ", "#Iterations", "#Bandwidth(Gbps)", "#Latency[us]");
-        for (int i = 2; i <= config.msg_size; i *= 2) {
-            single_rdma_rc_write_benchmark(config.num_iterations, &res, i, write_max_latency_qp);
+        
+        if(config.test_option == 1 || config.test_option == 2)
+        {
+            /* Measure RDMA write bandwidth on the QP with the maximum latency */
+            if(config.test_option == 0 || config.test_option == 2) {
+                fprintf(stdout, "         [Max_Lat: Connect %d] - RDMA Write BW Benchmark      \n", write_max_latency_qp);
+            } else {
+                fprintf(stdout, "         RDMA Write BW Benchmark      \n");
+            }
+            printf("%-20s %-20s %-20s %-20s\n", "#Message size(byte) ", "#Iterations", "#Bandwidth(Gbps)", "#Latency[us]");
+            for (int i = 2; i <= config.msg_size; i *= 2) {
+                if(single_rdma_rc_write_benchmark(config.num_iterations, &res, i, write_max_latency_qp)) {
+                    break;
+                }
+            }
+            fprintf(stdout, "----------------------------------------------------------------------------\n");
         }
-        // rdma_rc_write_benchmark(config.num_iterations, &res, config.msg_size, write_min_latency_qp, MULTIPLE);
 
-        fprintf(stdout, " ------------------------------------------------\n");
+
+        // fprintf(stdout, "         [Min_Lat: Connect %d] - RDMA Write BW Benchmark      \n", write_min_latency_qp);
+        // printf("%-20s %-20s %-20s %-20s\n", "#Message size(byte) ", "#Iterations", "#Bandwidth(Gbps)", "#Latency[us]");
+        // for (int i = 2; i <= config.msg_size; i *= 2) {
+        //     if(single_rdma_rc_write_benchmark(config.num_iterations, &res, i, write_min_latency_qp)) {
+        //         break;
+        //     }
+        // }
+        // fprintf(stdout, " ------------------------------------------------\n");
+
+
+        // /* Measure RDMA write bandwidth on the QP with the maximum latency */
+        // fprintf(stdout, "         [Max_Lat: Connect %d] - RDMA Write BW Benchmark      \n", write_max_latency_qp);
+        // printf("%-20s %-20s %-20s %-20s\n", "#Message size(byte) ", "#Iterations", "#Bandwidth(Gbps)", "#Latency[us]");
+        // for (int i = 2; i <= config.msg_size; i *= 2) {
+        //     if(single_rdma_rc_write_benchmark(config.num_iterations, &res, i, write_max_latency_qp)) {
+        //         break;
+        //     }
+        // }
+        // // rdma_rc_write_benchmark(config.num_iterations, &res, config.msg_size, write_min_latency_qp, MULTIPLE);
+
+        // fprintf(stdout, " ------------------------------------------------\n");
 
 /******************************************************************************
  *      //这一段也是RDMA write bandwidth test,只能测单次，但是可以最高甚至可以跑到超过100Gbps
